@@ -34,7 +34,16 @@ ROLE_PERMISSIONS = {
     "planner": {"quote.write", "catalog.write", "scenario.write", "scenario.run"},
     "dispatcher": {"nomination.write", "allocation.run", "transfer.write", "inventory.write"},
     "risk": {"outage.write", "scenario.approve", "report.read"},
-    "auditor": {"report.read", "audit.read"},
+    "auditor": {"report.read", "audit.read", "plan.read"},
+    "taskforce": {
+        "resource_version.write",
+        "plan.write",
+        "plan.read",
+        "checkin.write",
+        "metric.write",
+        "stage.advance",
+        "stage.rollback",
+    },
 }
 
 

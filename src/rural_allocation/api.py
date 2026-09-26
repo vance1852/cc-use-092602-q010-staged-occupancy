@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from .errors import SupplyError, ValidationFailed
+from .onboarding_service import OnboardingService
 from .service import SupplyService
 from .storage import connect
 
@@ -24,6 +25,7 @@ class Response:
 class JsonApplication:
     def __init__(self, service: SupplyService) -> None:
         self.service = service
+        self.onboarding = OnboardingService(service.connection, service.clock)
 
     @staticmethod
     def _actor(headers: Mapping[str, str]) -> str:
@@ -85,6 +87,27 @@ class JsonApplication:
                 return Response(200, self.service.run_scenario(actor, parts[1], payload["as_of_date"]))
             if method == "GET" and path == "/audit/chain":
                 return Response(200, self.service.audit_chain(actor))
+            # ---- 入住容量预演与分阶段切换 ----
+            if method == "POST" and path == "/resource-versions":
+                return Response(201, self.onboarding.freeze_resource_version(actor, payload))
+            if method == "GET" and len(parts) == 2 and parts[0] == "resource-versions":
+                return Response(200, self.onboarding.resource_version(parts[1]))
+            if method == "POST" and path == "/onboarding/plans":
+                return Response(201, self.onboarding.confirm_plan(actor, payload))
+            if method == "GET" and path == "/onboarding/plans":
+                return Response(200, self.onboarding.list_plans(actor))
+            if method == "GET" and len(parts) == 3 and parts[:2] == ["onboarding", "plans"]:
+                return Response(200, self.onboarding.plan_status(actor, parts[2]))
+            if method == "POST" and path == "/onboarding/checkins":
+                return Response(201, self.onboarding.record_checkin(actor, payload))
+            if method == "POST" and path == "/onboarding/metrics":
+                return Response(201, self.onboarding.record_metrics(actor, payload))
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["onboarding", "plans"] and parts[3] == "advance":
+                return Response(200, self.onboarding.advance_stage(actor, parts[2]))
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["onboarding", "plans"] and parts[3] == "converge":
+                return Response(200, self.onboarding.complete_convergence(actor, parts[2]))
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["onboarding", "plans"] and parts[3] == "rollback":
+                return Response(200, self.onboarding.rollback_stage(actor, parts[2], payload.get("to_stage")))
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except SupplyError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})

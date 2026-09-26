@@ -14,7 +14,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS supply_users (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('planner','dispatcher','risk','auditor')),
+    role TEXT NOT NULL CHECK(role IN ('planner','dispatcher','risk','auditor','taskforce')),
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
     created_at TEXT NOT NULL
 );
@@ -179,6 +179,110 @@ CREATE TABLE IF NOT EXISTS supply_idempotency (
     created_at TEXT NOT NULL,
     PRIMARY KEY(scope, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS resource_versions (
+    version_id TEXT PRIMARY KEY,
+    definition_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'frozen' CHECK(state IN ('frozen','superseded')),
+    created_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS resource_version_items (
+    version_id TEXT NOT NULL REFERENCES resource_versions(version_id),
+    resource_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('housing_unit','school_seat','primary_care','transit')),
+    provider_name TEXT NOT NULL,
+    capacity INTEGER NOT NULL CHECK(capacity >= 0),
+    source_revision TEXT NOT NULL,
+    PRIMARY KEY(version_id, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_items_kind
+ON resource_version_items(version_id, kind, resource_id);
+
+CREATE TABLE IF NOT EXISTS onboarding_plans (
+    plan_id TEXT PRIMARY KEY,
+    taskforce_id TEXT NOT NULL,
+    version_id TEXT NOT NULL REFERENCES resource_versions(version_id),
+    profiles_json TEXT NOT NULL,
+    rules_json TEXT NOT NULL,
+    profiles_sha256 TEXT NOT NULL,
+    rules_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'confirmed'
+        CHECK(state IN ('confirmed','invalidated','converged')),
+    invalidated_reason TEXT,
+    current_stage INTEGER NOT NULL DEFAULT 0 CHECK(current_stage >= 0 AND current_stage <= 3),
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_plans_version
+ON onboarding_plans(version_id, state);
+
+CREATE TABLE IF NOT EXISTS onboarding_plan_stages (
+    plan_id TEXT NOT NULL REFERENCES onboarding_plans(plan_id),
+    stage_index INTEGER NOT NULL CHECK(stage_index >= 0 AND stage_index <= 3),
+    stage_code TEXT NOT NULL,
+    target_households INTEGER NOT NULL,
+    demand_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','active','passed','rolled_back')),
+    entered_at TEXT,
+    passed_at TEXT,
+    PRIMARY KEY(plan_id, stage_index)
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_reservations (
+    plan_id TEXT NOT NULL REFERENCES onboarding_plans(plan_id),
+    kind TEXT NOT NULL CHECK(kind IN ('housing_unit','school_seat','primary_care','transit')),
+    reserved_units INTEGER NOT NULL CHECK(reserved_units >= 0),
+    PRIMARY KEY(plan_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_checkins (
+    receipt_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES onboarding_plans(plan_id),
+    stage_index INTEGER NOT NULL,
+    household_id TEXT NOT NULL,
+    resource_id TEXT,
+    kind TEXT,
+    units INTEGER NOT NULL CHECK(units >= 0),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL DEFAULT 'recorded' CHECK(state IN ('recorded','reverted')),
+    recorded_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    recorded_at TEXT NOT NULL,
+    reverted_at TEXT,
+    UNIQUE(plan_id, household_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkins_plan
+ON onboarding_checkins(plan_id, state, receipt_id);
+
+CREATE TABLE IF NOT EXISTS onboarding_metric_reports (
+    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES onboarding_plans(plan_id),
+    stage_index INTEGER NOT NULL,
+    metrics_json TEXT NOT NULL,
+    recorded_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    recorded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_stage_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES onboarding_plans(plan_id),
+    stage_index INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    actor_id TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_events_plan
+ON onboarding_stage_events(plan_id, event_id);
 
 CREATE TABLE IF NOT EXISTS supply_audit_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,

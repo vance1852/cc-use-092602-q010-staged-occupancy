@@ -16,6 +16,13 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,63}$")
 COMPENSATION_INDEXES = {"PEAK_VALLEY", "MARKET_ASSESSED", "POLICY_GUIDED", "NEGOTIATED", "GOVERNMENT_SET", "CUSTOM"}
 PRODUCTS = {"cultivated-land", "homestead", "resettlement-home", "facility-land", "forest-land", "reserve-land"}
 ROUTE_KINDS = {"land-pool", "settlement", "household", "storage", "service-site"}
+ONBOARDING_RESOURCE_KINDS = {"housing_unit", "school_seat", "primary_care", "transit"}
+
+
+def non_negative_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationFailed(f"{field} 必须是非负整数")
+    return value
 
 
 def required_text(value: object, field: str, maximum: int = 256) -> str:
@@ -220,6 +227,56 @@ class NominationRequest:
             priority=priority,
             idempotency_key=identifier(raw.get("idempotency_key"), "idempotency_key"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenResourceItem:
+    resource_id: str
+    kind: str
+    provider_name: str
+    capacity: int
+    source_revision: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenResourceVersion:
+    """专班冻结的住房及公共服务容量版本。
+
+    同一资源编号在新版本中携带新的 source_revision；引用旧版本的入住计划
+    会因此失效。
+    """
+
+    version_id: str
+    items: tuple[FrozenResourceItem, ...]
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "FrozenResourceVersion":
+        version_id = identifier(raw.get("version_id"), "version_id")
+        items_raw = raw.get("items")
+        if not isinstance(items_raw, list) or not items_raw:
+            raise ValidationFailed("items 必须是非空数组")
+        items: list[FrozenResourceItem] = []
+        seen: set[str] = set()
+        for raw_item in items_raw:
+            if not isinstance(raw_item, Mapping):
+                raise ValidationFailed("items 必须是对象数组")
+            kind = required_text(raw_item.get("kind"), "kind", 24)
+            if kind not in ONBOARDING_RESOURCE_KINDS:
+                raise ValidationFailed("kind 必须是 housing_unit、school_seat、primary_care 或 transit")
+            resource_id = identifier(raw_item.get("resource_id"), "resource_id")
+            if resource_id in seen:
+                raise ValidationFailed(f"容量来源 {resource_id} 在同一版本中重复")
+            seen.add(resource_id)
+            items.append(
+                FrozenResourceItem(
+                    resource_id=resource_id,
+                    kind=kind,
+                    provider_name=required_text(raw_item.get("provider_name"), "provider_name"),
+                    capacity=non_negative_integer(raw_item.get("capacity"), "capacity"),
+                    source_revision=identifier(raw_item.get("source_revision"), "source_revision"),
+                )
+            )
+        return cls(version_id=version_id, items=tuple(items))
 
 
 @dataclass(frozen=True, slots=True)

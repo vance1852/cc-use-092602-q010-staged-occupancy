@@ -9,7 +9,105 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .clock import FrozenClock
+from .onboarding_service import OnboardingService
 from .service import SupplyService
+
+
+def _run_onboarding(service: SupplyService) -> dict[str, object]:
+    onboarding = OnboardingService(service.connection, service.clock)
+    service.create_user("task", "task", "taskforce")
+    onboarding.freeze_resource_version("task", {
+        "version_id": "rv-2026-09",
+        "items": [
+            {"resource_id": "home-a", "kind": "housing_unit", "provider_name": "一号安置楼", "capacity": 6, "source_revision": "blueprint-1"},
+            {"resource_id": "home-b", "kind": "housing_unit", "provider_name": "二号安置楼", "capacity": 6, "source_revision": "blueprint-1"},
+            {"resource_id": "school-a", "kind": "school_seat", "provider_name": "新区一小", "capacity": 12, "source_revision": "edu-plan-1"},
+            {"resource_id": "clinic-a", "kind": "primary_care", "provider_name": "社区卫生服务中心", "capacity": 34, "source_revision": "health-plan-1"},
+            {"resource_id": "shuttle-a", "kind": "transit", "provider_name": "镇村接驳一线", "capacity": 24, "source_revision": "route-map-1"},
+        ],
+    })
+    households = [
+        {
+            "household_id": f"hh-{number:02d}",
+            "village_id": "north-village",
+            "members": 3,
+            "school_age_children": 1,
+            "daily_transit_trips": 2,
+            "housing_tier": "standard",
+        }
+        for number in range(1, 11)
+    ]
+    rules = {
+        "target_curve": {"prepare": 0, "pilot": 2, "expand": 6, "converge": 10},
+        "metric_thresholds": {
+            "occupancy_rate": 90,
+            "school_placement_rate": 90,
+            "clinic_service_rate": 90,
+            "transit_on_time_rate": 90,
+        },
+        "turnover_margin_percent": 10,
+        "rollback_policy": {"pilot": 1, "expand": 1, "converge": 2},
+    }
+    confirmed = onboarding.confirm_plan("task", {
+        "plan_id": "move-2026-09",
+        "taskforce_id": "new-town-taskforce",
+        "version_id": "rv-2026-09",
+        "households": households,
+        "rules": rules,
+        "idempotency_key": "confirm-move-2026-09",
+    })
+    onboarding.advance_stage("task", "move-2026-09")  # prepare -> pilot
+
+    def checkin(number: int) -> None:
+        payload = {
+            "receipt_id": f"rc-{number:02d}",
+            "plan_id": "move-2026-09",
+            "household_id": f"hh-{number:02d}",
+            "idempotency_key": f"receipt-key-{number:02d}",
+        }
+        onboarding.record_checkin("task", payload)
+        onboarding.record_checkin("task", dict(payload))  # 重复回执必须幂等
+
+    def metrics() -> None:
+        onboarding.record_metrics("task", {
+            "plan_id": "move-2026-09",
+            "metrics": {
+                "occupancy_rate": 96,
+                "school_placement_rate": 95,
+                "clinic_service_rate": 97,
+                "transit_on_time_rate": 94,
+            },
+        })
+
+    for number in (1, 2):
+        checkin(number)
+    metrics()
+    onboarding.advance_stage("task", "move-2026-09")  # pilot -> expand
+    for number in range(3, 7):
+        checkin(number)
+    metrics()
+    onboarding.advance_stage("task", "move-2026-09")  # expand -> converge
+    for number in range(7, 11):
+        checkin(number)
+    metrics()
+    converged = onboarding.complete_convergence("task", "move-2026-09")
+    status = onboarding.plan_status("audit", "move-2026-09")
+    audit = service.audit_chain("audit")
+    return {
+        "plan_id": confirmed["plan_id"],
+        "stages": [stage["stage"] for stage in confirmed["stages"]],
+        "final_state": converged["state"],
+        "checked_in_total": status["checked_in_total"],
+        "reservation": {
+            kind: next(
+                stage["capacity_sources"][kind]["demand"]
+                for stage in status["stages"] if stage["stage"] == "converge"
+            )
+            for kind in ("housing_unit", "school_seat", "primary_care", "transit")
+        },
+        "rollback_policy": status["rollback"]["policy"],
+        "audit_valid": audit["valid"],
+    }
 
 
 def run(workspace: Path) -> dict[str, object]:
@@ -30,7 +128,8 @@ def run(workspace: Path) -> dict[str, object]:
     service.create_scenario("plan", {"scenario_id": "relocation-recovery", "name": "关键机组检修恢复与需求回落", "market_index_drop_percent": "9", "route_capacity_changes": {"pool-a-b": "20"}, "demand_changes": {"village-a:cultivated-land": "-5"}})
     service.approve_scenario("risk", "relocation-recovery", 1)
     scenario = service.run_scenario("plan", "relocation-recovery", "2026-09-23")
-    result = {"status": "ok", "price": service.price_summary("PEAK_VALLEY"), "allocation_id": allocation["allocation_id"], "transfer": transfer, "scenario_run_id": scenario["run_id"], "audit": service.audit_chain("audit"), "workspace": workspace.name}
+    onboarding_summary = _run_onboarding(service)
+    result = {"status": "ok", "price": service.price_summary("PEAK_VALLEY"), "allocation_id": allocation["allocation_id"], "transfer": transfer, "scenario_run_id": scenario["run_id"], "onboarding": onboarding_summary, "audit": service.audit_chain("audit"), "workspace": workspace.name}
     connection.close()
     return result
 
