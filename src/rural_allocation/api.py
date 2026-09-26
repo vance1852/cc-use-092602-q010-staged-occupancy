@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .errors import SupplyError, ValidationFailed
 from .service import SupplyService
+from .staging_service import StagingService
 from .storage import connect
 
 
@@ -22,8 +23,9 @@ class Response:
 
 
 class JsonApplication:
-    def __init__(self, service: SupplyService) -> None:
+    def __init__(self, service: SupplyService, staging: StagingService | None = None) -> None:
         self.service = service
+        self.staging = staging or StagingService(service.connection, service.clock)
 
     @staticmethod
     def _actor(headers: Mapping[str, str]) -> str:
@@ -85,6 +87,36 @@ class JsonApplication:
                 return Response(200, self.service.run_scenario(actor, parts[1], payload["as_of_date"]))
             if method == "GET" and path == "/audit/chain":
                 return Response(200, self.service.audit_chain(actor))
+            # 入住容量预演与分阶段切换
+            if method == "POST" and path == "/resource-versions":
+                return Response(201, self.staging.publish_resource_version(actor, payload))
+            if method == "GET" and len(parts) == 2 and parts[0] == "resource-versions":
+                return Response(200, self.staging.resource_version(parts[1]))
+            if method == "POST" and path == "/household-batches":
+                return Response(201, self.staging.submit_household_batch(actor, payload))
+            if method == "POST" and path == "/staging-plans":
+                return Response(201, self.staging.create_staging_plan(actor, payload))
+            if method == "GET" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "capacity-sources":
+                seq_text = query.get("phase_seq", [None])[0]
+                return Response(200, self.staging.plan_capacity_sources(actor, parts[1], None if seq_text is None else int(seq_text)))
+            if method == "GET" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "blockers":
+                return Response(200, self.staging.plan_blockers(actor, parts[1]))
+            if method == "GET" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "rollback-window":
+                return Response(200, self.staging.rollback_window(actor, parts[1]))
+            if method == "GET" and len(parts) == 2 and parts[0] == "staging-plans":
+                return Response(200, self.staging.staging_plan(actor, parts[1]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "confirm":
+                return Response(200, self.staging.confirm_staging_plan(actor, parts[1]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "advance":
+                return Response(200, self.staging.advance_staging_plan(actor, parts[1], payload["as_of_date"]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "complete":
+                return Response(200, self.staging.complete_staging_plan(actor, parts[1], payload["as_of_date"]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "staging-plans" and parts[2] == "rollback":
+                return Response(200, self.staging.rollback_staging_plan(actor, parts[1], int(payload["to_phase_seq"]), payload["reason"]))
+            if method == "POST" and path == "/intake-receipts":
+                return Response(201, self.staging.record_intake_receipt(actor, payload))
+            if method == "POST" and path == "/metric-receipts":
+                return Response(201, self.staging.record_metric_receipt(actor, payload))
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except SupplyError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})

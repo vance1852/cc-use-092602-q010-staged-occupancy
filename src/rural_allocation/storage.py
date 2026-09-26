@@ -194,6 +194,136 @@ CREATE TABLE IF NOT EXISTS supply_audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_supply_audit_entity
 ON supply_audit_events(entity_type, entity_id, event_id);
+
+CREATE TABLE IF NOT EXISTS resource_versions (
+    version_id TEXT PRIMARY KEY,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','superseded')),
+    published_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    published_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS catalog_resources (
+    version_id TEXT NOT NULL REFERENCES resource_versions(version_id),
+    resource_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('housing','school','clinic','transit')),
+    site TEXT NOT NULL,
+    base_capacity INTEGER NOT NULL CHECK(base_capacity >= 0),
+    daily_turnover INTEGER NOT NULL CHECK(daily_turnover >= 0),
+    available_from TEXT NOT NULL,
+    PRIMARY KEY(version_id, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_resources_kind
+ON catalog_resources(version_id, kind, resource_id);
+
+CREATE TABLE IF NOT EXISTS household_batches (
+    batch_id TEXT PRIMARY KEY,
+    profiles_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    household_count INTEGER NOT NULL CHECK(household_count > 0),
+    submitted_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    submitted_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS staging_plans (
+    plan_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES household_batches(batch_id),
+    resource_version_id TEXT NOT NULL REFERENCES resource_versions(version_id),
+    curve_json TEXT NOT NULL,
+    rollback_json TEXT NOT NULL,
+    turnover_margin_percent INTEGER NOT NULL DEFAULT 0 CHECK(turnover_margin_percent BETWEEN 0 AND 100),
+    content_sha256 TEXT NOT NULL,
+    projection_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK(state IN ('draft','confirmed','active','completed','rolled_back','invalidated')),
+    active_phase_seq INTEGER,
+    invalidated_by_version TEXT,
+    invalidated_at TEXT,
+    created_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL,
+    confirmed_by TEXT REFERENCES supply_users(user_id),
+    confirmed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_staging_plans_version
+ON staging_plans(resource_version_id, state);
+
+CREATE TABLE IF NOT EXISTS plan_phase_states (
+    plan_id TEXT NOT NULL REFERENCES staging_plans(plan_id),
+    phase_seq INTEGER NOT NULL CHECK(phase_seq BETWEEN 0 AND 3),
+    phase TEXT NOT NULL,
+    by_date TEXT NOT NULL,
+    intake_households INTEGER NOT NULL,
+    cumulative_demand_json TEXT NOT NULL,
+    gates_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planned'
+        CHECK(status IN ('planned','entered','promoted','rolled_back')),
+    entered_at TEXT,
+    promoted_at TEXT,
+    rolled_back_at TEXT,
+    PRIMARY KEY(plan_id, phase_seq)
+);
+
+CREATE TABLE IF NOT EXISTS plan_phase_reservations (
+    plan_id TEXT NOT NULL REFERENCES staging_plans(plan_id),
+    phase_seq INTEGER NOT NULL CHECK(phase_seq BETWEEN 0 AND 3),
+    resource_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('housing','school','clinic','transit')),
+    reserved_qty INTEGER NOT NULL CHECK(reserved_qty >= 0),
+    consumed_qty INTEGER NOT NULL DEFAULT 0 CHECK(consumed_qty >= 0),
+    released_qty INTEGER NOT NULL DEFAULT 0 CHECK(released_qty >= 0),
+    state TEXT NOT NULL DEFAULT 'reserved' CHECK(state IN ('reserved','released')),
+    PRIMARY KEY(plan_id, phase_seq, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reservations_deduct
+ON plan_phase_reservations(plan_id, phase_seq, kind, state, resource_id);
+
+CREATE TABLE IF NOT EXISTS intake_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES staging_plans(plan_id),
+    phase_seq INTEGER NOT NULL,
+    household_profile_id TEXT NOT NULL,
+    quantities_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    request_sha256 TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    recorded_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    recorded_at TEXT NOT NULL,
+    UNIQUE(plan_id, household_profile_id)
+);
+
+CREATE TABLE IF NOT EXISTS metric_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES staging_plans(plan_id),
+    phase_seq INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('housing','school','clinic','transit')),
+    served_delta INTEGER NOT NULL CHECK(served_delta >= 0),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    request_sha256 TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    recorded_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_metric_receipts_plan
+ON metric_receipts(plan_id, phase_seq, kind);
+
+CREATE TABLE IF NOT EXISTS plan_gate_evaluations (
+    evaluation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES staging_plans(plan_id),
+    at_phase_seq INTEGER NOT NULL,
+    gate TEXT NOT NULL CHECK(gate IN ('entry','advance','complete','rollback')),
+    as_of_date TEXT NOT NULL,
+    passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+    blockers_json TEXT NOT NULL,
+    evaluated_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    evaluated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gate_evaluations_plan
+ON plan_gate_evaluations(plan_id, evaluation_id);
 """
 
 
